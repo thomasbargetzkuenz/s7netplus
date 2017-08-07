@@ -576,12 +576,16 @@ namespace S7.Net
         /// <returns>The number of read bytes</returns>
         public async Task<int> ReadClassAsync(object sourceClass, int db, int startByteAdr = 0)
         {
-            Type classType = sourceClass.GetType();
-            int numBytes = Types.Class.GetClassSize(classType);
+            int numBytes = Types.Class.GetClassSize(sourceClass);
+			if(numBytes <= 0)
+            {
+                throw new Exception("The size of the class is less than 1 byte and therefore cannot be read");
+            }
+			
             // now read the package
             var resultBytes = await ReadBytesAsync(DataType.DataBlock, db, startByteAdr, numBytes);
             // and decode it
-            Types.Class.FromBytes(sourceClass, classType, resultBytes);
+            Types.Class.FromBytes(sourceClass, resultBytes);
 
             return resultBytes.Length;
         }
