@@ -16,6 +16,8 @@ namespace S7.Net
     /// </summary>
     public class Plc : IDisposable
     {
+        private const int CONNECTION_TIMED_OUT_ERROR_CODE = 10060;
+
         private Socket _mSocket; //TCP connection to device
 
         /// <summary>
@@ -37,7 +39,7 @@ namespace S7.Net
         /// Slot of the CPU of the plc
         /// </summary>
         public Int16 Slot { get; private set; }
-        
+
         /// <summary>
         /// Pings the IP address and returns true if the result of the ping is Success.
         /// </summary>
@@ -48,18 +50,9 @@ namespace S7.Net
 #if NETFX_CORE
                 return (!string.IsNullOrWhiteSpace(IP));
 #else
-                using (Ping ping = new Ping())
+                using (var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
                 {
-                    PingReply result;
-                    try
-                    {
-                        result = ping.Send(IP);
-                    }
-                    catch (PingException)
-                    {
-                        result = null;
-                    }
-                    return result != null && result.Status == IPStatus.Success;
+                    return Connect(socket) == ErrorCode.NoError;
                 }
 #endif
             }
@@ -79,7 +72,7 @@ namespace S7.Net
                 {
                     if (_mSocket == null)
                         return false;
-                    
+
 #if NETFX_CORE
                     return _mSocket.Connected;
 #else
@@ -99,7 +92,7 @@ namespace S7.Net
         /// Contains the last error code registered when executing a function
         /// </summary>
         public ErrorCode LastErrorCode { get; private set; }
-        
+
         /// <summary>
         /// Creates a PLC object with all the parameters needed for connections.
         /// For S7-1200 and S7-1500, the default is rack = 0 and slot = 0.
@@ -117,6 +110,38 @@ namespace S7.Net
             CPU = cpu;
             Rack = rack;
             Slot = slot;
+        }
+
+        private ErrorCode Connect(Socket socket)
+        {
+            try
+            {
+                IPEndPoint server = new IPEndPoint(IPAddress.Parse(IP), 102);
+                socket.Connect(server);
+
+                return ErrorCode.NoError;
+            }
+            catch (SocketException sex)
+            {
+                // see https://msdn.microsoft.com/en-us/library/windows/desktop/ms740668(v=vs.85).aspx
+                if (sex.ErrorCode == CONNECTION_TIMED_OUT_ERROR_CODE)
+                {
+                    LastErrorCode = ErrorCode.IPAddressNotAvailable;
+                }
+                else
+                {
+                    LastErrorCode = ErrorCode.ConnectionError;
+                }
+
+                LastErrorString = sex.Message;
+            }
+            catch (Exception ex)
+            {
+                LastErrorCode = ErrorCode.ConnectionError;
+                LastErrorString = ex.Message;
+            }
+
+            return LastErrorCode;
         }
 
         private async Task SendAsync(byte[] buffer, int offset, int size, SocketFlags flags)
@@ -149,34 +174,13 @@ namespace S7.Net
         {
             byte[] bReceive = new byte[256];
 
-            try
-            {
-                // check if available
-                if (!IsAvailable)
-                {
-                    throw new Exception();
-                }
-            }
-            catch
-            {
-                LastErrorCode = ErrorCode.IPAddressNotAvailable;
-                LastErrorString = string.Format("Destination IP-Address '{0}' is not available!", IP);
-                return LastErrorCode;
-            }
+            _mSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            _mSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveTimeout, 1000);
+            _mSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendTimeout, 1000);
 
-            try
+            if (Connect(_mSocket) != ErrorCode.NoError)
             {
-                _mSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-                _mSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveTimeout, 1000);
-                _mSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendTimeout, 1000);
-                IPEndPoint server = new IPEndPoint(IPAddress.Parse(IP), 102);
-                await Task.Factory.FromAsync(_mSocket.BeginConnect(server, null, null), _mSocket.EndConnect);
-            }
-            catch (Exception ex)
-            {
-                LastErrorCode = ErrorCode.ConnectionError;
-                LastErrorString = ex.Message;
-                return ErrorCode.ConnectionError;
+                return LastErrorCode;
             }
 
             try
@@ -268,7 +272,7 @@ namespace S7.Net
         /// </summary>
         public void Close()
         {
-            if (_mSocket != null && _mSocket.Connected) 
+            if (_mSocket != null && _mSocket.Connected)
             {
                 _mSocket.Shutdown(SocketShutdown.Both);
                 _mSocket.Close();
@@ -577,11 +581,11 @@ namespace S7.Net
         public async Task<int> ReadClassAsync(object sourceClass, int db, int startByteAdr = 0)
         {
             int numBytes = Types.Class.GetClassSize(sourceClass);
-			if(numBytes <= 0)
+            if (numBytes <= 0)
             {
                 throw new Exception("The size of the class is less than 1 byte and therefore cannot be read");
             }
-			
+
             // now read the package
             var resultBytes = await ReadBytesAsync(DataType.DataBlock, db, startByteAdr, numBytes);
             // and decode it
@@ -616,7 +620,7 @@ namespace S7.Net
         /// <param name="db">Index of the DB; es.: 1 is for DB1</param>
         /// <param name="startByteAdr">Start byte address. If you want to read DB1.DBW200, this is 200.</param>
         /// <returns>An instance of the class with the values read from the plc. If no data has been read, null will be returned</returns>
-        public async Task<T> ReadClassAsync<T>(int db, int startByteAdr = 0) where T:class
+        public async Task<T> ReadClassAsync<T>(int db, int startByteAdr = 0) where T : class
         {
             return await ReadClassAsync<T>(() => Activator.CreateInstance<T>(), db, startByteAdr);
         }
@@ -647,7 +651,7 @@ namespace S7.Net
         /// <param name="db">Index of the DB; es.: 1 is for DB1</param>
         /// <param name="startByteAdr">Start byte address. If you want to read DB1.DBW200, this is 200.</param>
         /// <returns>An instance of the class with the values read from the plc. If no data has been read, null will be returned</returns>
-        public async Task<T> ReadClassAsync<T>(Func<T> classFactory, int db, int startByteAdr = 0) where T:class
+        public async Task<T> ReadClassAsync<T>(Func<T> classFactory, int db, int startByteAdr = 0) where T : class
         {
             var instance = classFactory();
             int readBytes = await ReadClassAsync(instance, db, startByteAdr);
@@ -672,7 +676,7 @@ namespace S7.Net
             var t = Task.Factory.StartNew(() => ReadMultipleVarsAsync(dataItems)).Unwrap();
             t.Wait();
         }
-        
+
         /// <summary>
         /// Reads a number of bytes from a DB starting from a specified index. This handles more than 200 bytes with multiple requests.
         /// If the read was not successful, check LastErrorCode or LastErrorString.
@@ -707,7 +711,7 @@ namespace S7.Net
 
             return t.Result;
         }
-        
+
         /// <summary>
         /// Reads a single variable from the plc, takes in input strings like "DB1.DBX0.0", "DB20.DBD200", "MB20", "T45", etc.
         /// If the read was not successful, check LastErrorCode or LastErrorString.
